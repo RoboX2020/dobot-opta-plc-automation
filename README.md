@@ -80,12 +80,46 @@ Each Dobot runs its own independent Python script in a separate terminal. They c
 - **Dobot 3 (Multi-Series)**: A powerful extension featuring a **series concept**—defining multiple separate task lists (series 1, 2, 3...) that cycle progressively on each PLC trigger.
 
 ### 🕹️ Custom CLI Teach Menu
-The Python system includes a text-based menu for rapid programming:
-- `+` Add pick-place
-- `w <sec>` Add wait
-- `c <speed>` Add conveyor task
-- `ls` List tasks
-- `mv <from> <to>` Reorder tasks
+The Python system includes a comprehensive text-based menu for rapid, full-featured programming of the Dobot:
+
+#### 📍 Positions
+- `t <name>`: Teach a position by name
+- `l`: List saved positions
+- `d <name>`: Delete a position
+- `m <name>`: Test-move to a position
+
+#### 📋 Tasks (Active Series)
+- `+`: Add a pick-place task at the end
+- `w <sec> [pos]`: Add a wait task
+- `c <speed> [dur] [idx]`: Add a conveyor task
+- `cc <speed> [dur] [idx]`: Run conveyor NOW (test only)
+- `mv <from> <to>`: Move/reorder a task
+- `-`: Remove a task by index
+- `ls`: List tasks in active series
+
+#### 🔄 Series Management
+- `sl`: List all series
+- `sg <n>`: Switch active series to N
+- `s+`: Add new empty series at end
+- `s-`: Delete (or clear) the active series
+
+#### ⚙️ Other Commands
+- `s`: Save all configurations immediately
+- `p`: Switch to play mode
+- `q`: Back to main menu
+
+### 🖥️ Custom GUI Dashboard (New!)
+For a more visual experience, we've introduced a **CustomTkinter GUI Dashboard** (`gui_dashboard.py`). This modern, dark-themed control panel provides graphical buttons to:
+- Connect & Disconnect the Dobot
+- Home the arm
+- Trigger "Play Mode" visually
+- View live console logs and status directly within the interface
+
+**To run the GUI:**
+```bash
+pip install -r requirements.txt
+python gui_dashboard.py
+```
 
 ---
 
