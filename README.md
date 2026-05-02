@@ -3,8 +3,6 @@
  
 https://github.com/user-attachments/assets/27fadc8d-e8d6-4801-a44d-28e9fb414ec2
 
-  https://github.com/user-attachments/assets/5aa8accb-a3ee-4860-8114-ca236c24bb07
-
   <h1>🤖 Dobot Opta PLC Integration System</h1>
   <p><em>An independent, coordinated communication interface between Arduino Opta PLC and Dobot Magician Lite arms</em></p>
 
@@ -138,6 +136,8 @@ python gui_dashboard.py
 
 ---
 
+  https://github.com/user-attachments/assets/5aa8accb-a3ee-4860-8114-ca236c24bb07
+  
 ## 📝 License
 
 This project is licensed under the [MIT License](LICENSE).
