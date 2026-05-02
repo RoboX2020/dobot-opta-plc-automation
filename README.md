@@ -139,5 +139,5 @@ python gui_dashboard.py
 This project is licensed under the [MIT License](LICENSE).
 
 <p align="center">
-  <i>Developed with ❤️ for Advanced Robotics & Automation</i>
+  <i>Developed with ❤️ for Robotics and Autonomous Systems Engineering project at MSN ASU</i>
 </p>
