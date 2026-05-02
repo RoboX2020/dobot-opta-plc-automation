@@ -1,0 +1,227 @@
+# Project Summary: Multi-Dobot Industrial Automation System
+
+## Overview
+
+A coordinated robotic assembly line using **four Dobot Magician Lite arms** orchestrated by an **Arduino Opta PLC**, with conveyor belts, an IR proximity sensor as the cycle trigger, and a teach-pendant-style Python control system. Built incrementally over the course of this engagement, with each robot performing a discrete pick-and-place stage and signaling the next via the PLC.
+
+## Hardware
+
+### Robots
+- **4× Dobot Magician Lite** — 4-DOF arms (X, Y, Z, R) with suction-cup end-effectors. R-axis is wrist yaw rotation (~±150° range).
+- Each arm has GPIO pins for digital IO. Specifically used:
+  - **Pin 16** (input) — receives "start" signal from PLC
+  - **Pin 22** (output) — sends "done" signal back to PLC
+- **STP1 / STP2** stepper outputs on the dobot controller drive conveyor belts via `SetEMotor`.
+
+### PLC
+- **Arduino Opta** running custom C++ sketch.
+- Pins used:
+  - **D0, D1, D2, D3** — digital outputs to dobot start pins (D1→dobot1, D0→dobot2, D2→dobot3, D3→dobot4)
+  - **A0, A1, A2** — analog inputs reading dobot done signals
+  - **A7, A6** — analog inputs for IR sensors (initially one IR, later two for parallel-trigger topology)
+
+### IR Sensor
+- Industrial NPN-style proximity sensor.
+- Wired to A7 (and later A6 for a second sensor).
+- Threshold tuned to **`< 50`** on the 12-bit ADC for "tripped" — idle is high, triggered drops near 0.
+
+### Connectivity
+- Each dobot connects to the host laptop directly via USB COM port (point-to-point, not via the Magic Box ExtController hub — the hub caused sub-device ambiguity issues).
+- Common ground tied between PLC and all dobots is required for IO signals to read correctly.
+
+## Software Stack
+
+### PLC Sketch (Arduino C++)
+
+Final chained version reads IR + done signals and drives the chain of start signals:
+
+```cpp
+// IR sensor < 50 triggers dobot 1
+// Each subsequent stage's done signal (analog read >= 200) triggers the next dobot
+```
+
+For the parallel-trigger version (2 dobots, 2 IRs):
+```cpp
+// IR1 < 50 -> D1 (dobot 1 start)
+// IR2 < 50 -> D0 (dobot 2 start)
+// No done-signal chaining needed
+```
+
+Serial Monitor output for IR diagnostics is included throughout.
+
+### Dobot Control (Python via DobotDllType)
+
+**SDK choice**: ported from `DobotEDU` (the high-level lab environment that ships with DobotLab) to `DobotDllType` (the raw DLL wrapper). This was non-trivial — different APIs, different command-queue model, different units. The vision script for dobot 1 was the most involved port.
+
+**Key SDK mapping**:
+| DobotEDU | DobotDllType |
+|---|---|
+| `m_lite.set_ptpcmd(ptp_mode=1, ...)` | `dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, r, 1)` |
+| `m_lite.wait(delay=0.5)` | `dType.SetWAITCmd(api, 500, 1)` (queue) or `dType.dSleep(500)` |
+| `m_lite.set_endeffector_suctioncup(enable=True, on=True)` | `dType.SetEndEffectorSuctionCup(api, 1, 1, 1)` |
+| `magicbox.set_converyor(index=STP1, speed=-100)` | `dType.SetEMotor(api, 0, 1, -10000, 0)` (speed in pulses/sec) |
+| `magicbox.set_io_multiplex / set_iodo / get_iodi` | `dType.SetIOMultiplexing / SetIODO / GetIODI` |
+| `m_lite.set_armspeed_ratio(set_type=1, set_value=50)` | `dType.SetPTPCommonParams(api, 50, 50, 0)` |
+| `m_lite.set_homecmd()` | `dType.SetHOMECmd(api, 0, 1)` + `wait_for_cmd(idx)` |
+
+**Connection pattern** (every dobot script uses this):
+```python
+api = dType.load()
+state = dType.ConnectDobot(api, COM_PORT, BAUD)  # status[0]==0 means OK
+dType.ClearAllAlarmsState(api)                    # clears latched alarms
+dType.SetQueuedCmdClear(api)
+dType.SetQueuedCmdStartExec(api)                  # MUST come before SetPTPCommonParams
+dType.SetPTPCommonParams(api, 50, 50, 0)          # isQueued=0 (immediate)
+```
+
+### Critical Bugs Encountered & Fixed
+
+1. **Queue-order hang**: `SetPTPCommonParams` with `isQueued=1` blocked indefinitely because `SetQueuedCmdStartExec` hadn't been called yet. Fix: call `SetQueuedCmdStartExec` first, or use `isQueued=0` for config commands.
+
+2. **DLL accepts moves but motors don't move**: caused by latched alarms from prior failed runs. `GetPose` returned the *commanded* values (not actual physical position), giving the illusion of success. Fix: always call `ClearAllAlarmsState` after `ConnectDobot`.
+
+3. **`Connection failed [2, 0, 0, ...]` (port occupied)**: a previous Python process held the COM port even after Ctrl+C. Fix: kill stuck `python.exe` processes, close DobotStudio, re-plug USB.
+
+4. **Two MagicianLite sub-devices under one ExtController**: commands went to one arm while user watched the other. Fix: bypass the hub, connect each dobot via direct USB COM port. `SetDeviceWithIndex` was not available in the installed DLL version anyway.
+
+5. **JSON load crash on empty file**: `dobot2_coords.json` got created empty after a previous abort. Fix: catch `JSONDecodeError` and `ValueError` in `load_data`, rename the bad file to `.bad`, start fresh.
+
+6. **Function deletion via paste error**: user pasted a new `main()` over `teach_menu()` causing `NameError: name 'teach_menu' is not defined`. Resolved by re-pasting the missing function.
+
+## Per-Dobot Architecture
+
+Each dobot runs its own independent Python script in its own terminal. They communicate **only through the PLC** — no direct dobot-to-dobot coordination.
+
+### Common script structure (every dobot)
+
+- **JSON-backed coordinate storage** (`dobotN_coords.json`) — persistent positions and tasks survive between runs.
+- **Teach mode** — drag-to-teach by holding the unlock button on the arm, releasing, pressing Enter. `GetPose` captures `(x, y, z, r)` 4-tuples.
+- **Position naming** — arbitrary string keys (`pick_a`, `place_a`, `start`, `tray_1`, `drop_blue`, etc.).
+- **Test moves** — `m <name>` flies to a saved pose with safe-Z hover descent for verification before running.
+- **Pick / place primitives** — hover, descend, suction toggle, queued 500ms wait, retract.
+- **PLC handshake** — `wait_for_plc_start()` blocks on `GetIODI(api, 16) == 0`; `signal_plc_done()` pulses pin 22 HIGH for 1 second.
+- **Homing** — moved out of `play()` into a standalone option so user can choose whether to home before triggering (per user request: "ask before listening for PLC, not after receiving").
+- **Save-on-quit** — JSON written on every meaningful state change and again in the `finally` block.
+- **Cleanup** — `stop_all_conveyors()` + `SetQueuedCmdStopExec` + `DisconnectDobot` in `finally`, so Ctrl+C never leaves the system in a bad state.
+
+### Task system (dobots 2, 3, 4 — pick-place style)
+
+Each task is a dict with a `type`:
+
+| Type | Fields | Behavior |
+|---|---|---|
+| `pick_place` | `pick`, `place` (position names) | Hover→descend→grab→retract→hover→descend→release→retract |
+| `wait` | `seconds` | `time.sleep(seconds)` — Python-level pause |
+| `conveyor` | `index` (0=STP1, 1=STP2), `speed` (pulses/sec, signed), `duration` (0=no auto-stop) | Three modes: timed run, async start, async stop |
+
+Backwards compatibility: tasks without a `type` field are auto-tagged as `pick_place` on load.
+
+### Task management commands (text-based menu)
+
+- `+` add pick-place
+- `w <sec> [pos]` add wait (optional insert position)
+- `c <speed> [dur] [idx] [pos]` add conveyor task
+- `cc <speed> [dur] [idx]` run conveyor *now* without adding (test mode)
+- `mv <from> <to>` reorder
+- `-` remove by index
+- `ls` list tasks
+- `t / l / d / m` for positions
+
+### Dobot 1 (vision-based sorter — partially implemented)
+
+Most ambitious piece. Originally written in DobotEDU as a 12-cell tray scanner using:
+- **OpenCV** for HSV color segmentation + contour analysis
+- **Random Forest classifier** (sklearn) trained on shape features (area, perimeter, vertex count, circularity, solidity)
+- **Consensus voting** (deque-based vote window) for stable per-cell labels
+- **Self-correcting AI auditor** (`force_global_distribution`) that enforces expected counts (3 cubes, 3 pentagons, 3 spheres, 3 clovers) and overrides outlier votes
+- **CSV-backed training data** (`training_data_v2.csv`) with interactive labeling keys (`a`–`l` to select cell, `1`–`4` to label CUBE/PENTAGON/SPHERE/CLOVER, `0` for batch train)
+- **Phase 2 physical sort**: 3 transfer trays, each filled with one of each shape type, then moved to a drop-off zone with conveyor advance between cycles
+
+Status: ported to `DobotDllType`, ran into the `SetPTPCommonParams` queue-order bug, partially debugged but vision-side never confirmed end-to-end working under direct DLL control. User pivoted to simpler pick-place for dobots 2/3/4.
+
+### Dobot 2 (pick-place sorter — fully working)
+
+Pick-and-place with named positions, PLC handshake, wait tasks, conveyor tasks. Used as the testbed for everything that was later replicated to dobots 3 and 4. Optional camera-based color sorter (`play_vision`) was added as menu option `[8]` but treated as experimental.
+
+### Dobot 3 (multi-series — fully working)
+
+Extension of dobot 2 with a **series concept**: instead of one task list, the user can define multiple separate task lists (series 1, 2, 3, ...). Each series runs on its own PLC trigger. After the last series, loops back to series 1 (configurable via `LOOP_FOREVER`).
+
+JSON format:
+```json
+{
+  "positions": {...},
+  "series": [
+    [task1, task2, ...],   // series 1
+    [task1, ...],          // series 2
+    [...]                  // series 3
+  ]
+}
+```
+
+Use case: same conveyor / PLC setup but different pick-place sequences depending on what cycle of the larger workflow we're in.
+
+### Dobot 4 (user-implemented)
+
+User wrote this themselves following the dobot 2/3 pattern.
+
+## PLC ↔ Dobot Signal Convention
+
+- **Polarity**: dobot polls `GetIODI(pin) == 0` (active-LOW start). PLC drives output HIGH when triggering. Each dobot's reading correctly inverts via the wiring/level shifters in use.
+- **Done pulse**: dobot drives pin 22 HIGH for ~1 second, then back to LOW. PLC reads it as analog (`analogRead >= 200`) and routes to the next stage's start output.
+- **Voltage levels**: Opta D outputs are 24V, MagicianLite GPIO is 3.3V — appropriate level shifting / optocoupling required (user has it working but exact circuit wasn't shared).
+- **Common ground** is tied across PLC and all dobots — without it, signals float and read garbage.
+
+## Files in the Project
+
+```
+nomnomco/
+├── dobot.py                    # Dobot 1 (vision sorter, DobotDllType port)
+├── dobot2.py                   # Dobot 2 (pick-place + waits + conveyor)
+├── dobot3.py                   # Dobot 3 (multi-series version)
+├── dobot4.py                   # Dobot 4 (user-written)
+├── test.py                     # Diagnostic script for connection/homing/PTP testing
+├── DobotDllType.py             # SDK wrapper (vendor-supplied)
+├── dobot2_coords.json          # Dobot 2 saved positions and tasks
+├── dobot3_coords.json          # Dobot 3 saved positions and series
+├── training_data_v2.csv        # Dobot 1 vision training samples
+└── .venv/                      # 64-bit Python virtual environment (matches DLL bitness)
+```
+
+PLC sketch is on the Opta itself, flashed via Arduino IDE.
+
+## Key Settings Tuned During the Project
+
+| Setting | Final Value | Notes |
+|---|---|---|
+| IR threshold | `< 50` | Initial 200 was too high for the sensor's idle-vs-tripped span |
+| Done-signal threshold | `>= 200` | Analog read on Opta of dobot 22's HIGH state |
+| Conveyor speed | `10000` pulses/sec (default) | DobotEDU's `60`/`100` does not map directly |
+| Safe hover Z | `60.0` mm | Above tray to clear during lateral moves |
+| Suction wait | `500` ms (queued) | Lets vacuum form before lift / vent before retract |
+| PTP velocity / acceleration ratio | `50% / 50%` | Conservative for safety during teaching |
+| PLC done pulse | `1.0` sec HIGH | Long enough for downstream polling at 50ms intervals |
+| Polling interval (dobot reads PLC start) | `50` ms | Catches the ~1s done pulse easily |
+
+## Operational Workflow (Final State)
+
+1. Power on all dobots and the Opta.
+2. In separate terminals: `python dobot1.py`, `python dobot2.py`, `python dobot3.py`, `python dobot4.py`. Each homes (optional), then sits at "Waiting for PLC start signal..."
+3. IR sensor trips (object passes) → Opta sets D1 HIGH → dobot 1's pin 16 reads HIGH → dobot 1 runs its tasks.
+4. Dobot 1 finishes → pulses pin 22 HIGH → Opta A0 reads ≥200 → Opta sets D0 HIGH → dobot 2 starts.
+5. Cascade continues: dobot 2 → dobot 3 → dobot 4.
+6. For dobot 3 specifically, each PLC trigger advances to the next *series* of tasks; after the last series, cycles back to series 1.
+
+## Outstanding Items / Known Limitations
+
+- **Dobot 1 vision** never fully validated under DobotDllType. Working alternatives explored (preview-only mode in dobot 2, manual color labeling, position-based sorting).
+- **Sequential conveyor + arm motion** — current task dispatcher is single-threaded, so a timed conveyor task blocks the arm. To run a belt and an arm motion truly in parallel, would need threading or `c <speed>` (no auto-stop) followed by pick-place tasks then `c 0` to stop.
+- **Edge detection on PLC trigger** — current code treats start signal as a level. If an object dwells in the IR for several seconds, the trigger stays asserted; if the dobot loops and returns to wait quickly, it may re-fire on the same object. Not currently a problem at present cadences but a known sharp edge.
+- **No position-tied-to-series UI** — positions are global across all series. Could be a feature if the user ever wants per-series namespacing, but isn't currently needed.
+- **JSON corruption recovery** — on bad file, renames to `.bad` and starts fresh. Position/task data is lost unless user restores from backup.
+
+## Project State as of Today
+
+Working: PLC chain, IR trigger, dobots 2/3 pick-place + PLC + conveyor, dobot 4 (user-implemented), teaching workflow, multi-series cycling on dobot 3. The sensor-to-relay handshake was verified at the multimeter / serial-monitor level. The end-to-end cascade has been demonstrated.
+
+Active development: dobot 3 multi-series usage in production runs.
