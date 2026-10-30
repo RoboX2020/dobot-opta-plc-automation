@@ -1,3 +1,8 @@
+# ============================================================================
+# dobot4.py - a trimmed-down iteration: coordinate teaching plus the PLC
+# handshake only (no vision, no series menu). Positions save to
+# dobot4_coords.json.
+# ============================================================================
 # dobot4.py — Pick-and-place with coordinate teaching + PLC handshake
 import DobotDllType as dType
 import json
@@ -35,6 +40,7 @@ PLC_DONE_PIN = 22     # dobot pin wired to PLC input (here -> PLC A1)
 # ============================================================
 # DOBOT HELPERS
 # ============================================================
+# Wait for the robot's queued command to finish executing (polls until done or timeout).
 def wait_for_cmd(idx):
     while True:
         cur = dType.GetQueuedCmdCurrentIndex(api)[0]
@@ -42,19 +48,24 @@ def wait_for_cmd(idx):
             break
         dType.dSleep(50)
 
+# Point-to-point move: send the arm to (x, y, z, r).
 def ptp(x, y, z, r=0.0):
     return dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, r, 1)[0]
 
+# Read where the arm currently is.
 def get_pose():
     p = dType.GetPose(api)
     return float(p[0]), float(p[1]), float(p[2]), float(p[3])
 
+# Turn the suction cup gripper on or off.
 def suction(on):
     dType.SetEndEffectorSuctionCup(api, 1, 1 if on else 0, 1)
 
+# Insert a pause into the robot's command queue.
 def queued_wait(ms):
     dType.SetWAITCmd(api, ms, 1)
 
+# Configure the arm's GPIO pins that talk to the PLC (pin 16 = start in, pin 22 = done out).
 def setup_plc_io():
     if not USE_PLC:
         return
@@ -63,6 +74,7 @@ def setup_plc_io():
     dType.SetIODO(api, PLC_DONE_PIN, 0)              # done LOW at boot
     print(f"PLC IO configured: start=pin {PLC_START_PIN}, done=pin {PLC_DONE_PIN}")
 
+# Pause here until the PLC raises the start signal (the previous stage finished).
 def wait_for_plc_start():
     print(f"Waiting for PLC start signal on pin {PLC_START_PIN}... (Ctrl+C to cancel)")
     try:
@@ -76,12 +88,14 @@ def wait_for_plc_start():
         raise
     print("PLC start received.")
 
+# Tell the PLC 'my stage is done' by pulsing the done pin.
 def signal_plc_done():
     print("Asserting done signal to PLC.")
     dType.SetIODO(api, PLC_DONE_PIN, 1)
     time.sleep(1.0)
     dType.SetIODO(api, PLC_DONE_PIN, 0)
 
+# Open the USB connection to the arm and sanity-check it.
 def connect():
     global api
     api = dType.load()
@@ -103,6 +117,7 @@ def connect():
     setup_plc_io()
     print("Dobot ready.")
 
+# Close the connection cleanly.
 def disconnect():
     try:
         dType.SetQueuedCmdStopExec(api)
@@ -110,6 +125,7 @@ def disconnect():
     except Exception:
         pass
 
+# Send the arm to its calibrated home position.
 def home_arm():
     print("Homing... (arm will move to home position)")
     home_idx = dType.SetHOMECmd(api, 0, 1)[0]
@@ -119,6 +135,7 @@ def home_arm():
 # ============================================================
 # PERSISTENCE
 # ============================================================
+# Load the taught positions/series from the JSON save file.
 def load_data():
     global positions, tasks
     if os.path.exists(COORDS_FILE):
@@ -143,6 +160,7 @@ def load_data():
     positions = {}
     tasks = []
 
+# Write the taught positions/series back to the JSON save file.
 def save_data():
     with open(COORDS_FILE, "w") as f:
         json.dump({"positions": positions, "tasks": tasks}, f, indent=2)
@@ -151,6 +169,7 @@ def save_data():
 # ============================================================
 # TEACHING
 # ============================================================
+# Save the arm's current position under a name (teaching by guiding).
 def teach_position(name):
     print("\n" + "=" * 50)
     print(f"  TEACHING: '{name}'")
@@ -168,6 +187,7 @@ def teach_position(name):
     save_data()
     return True
 
+# Print all taught positions.
 def list_positions():
     if not positions:
         print("No positions saved.")
@@ -177,6 +197,7 @@ def list_positions():
         x, y, z, r = positions[name]
         print(f"  {name:20s} ({x:7.2f}, {y:7.2f}, {z:7.2f}, {r:6.2f})")
 
+# Print the task steps of the current series.
 def list_tasks():
     if not tasks:
         print("No tasks defined.")
@@ -185,6 +206,7 @@ def list_tasks():
     for i, t in enumerate(tasks, 1):
         print(f"  [{i}] pick:'{t['pick']}'  ->  place:'{t['place']}'")
 
+# Delete a taught position.
 def delete_position(name):
     if name in positions:
         del positions[name]
@@ -193,6 +215,7 @@ def delete_position(name):
     else:
         print(f"'{name}' not found.")
 
+# Add a move step to the series.
 def add_task():
     list_positions()
     if len(positions) < 2:
@@ -210,6 +233,7 @@ def add_task():
     save_data()
     print(f"Added task: {pick} -> {place}")
 
+# Remove a step from the series.
 def delete_task(idx_str):
     try:
         idx = int(idx_str) - 1
@@ -222,6 +246,7 @@ def delete_task(idx_str):
     except ValueError:
         print("Invalid index.")
 
+# Move to a taught position (to check a teaching).
 def test_move(name):
     if name not in positions:
         print(f"'{name}' not found.")
@@ -242,6 +267,7 @@ def test_move(name):
 # ============================================================
 # PICK AND PLACE
 # ============================================================
+# Pick at a taught position (hover, descend, suction on, lift).
 def do_pick(name):
     x, y, z, r = positions[name]
     print(f"  PICK '{name}' ({x:.1f}, {y:.1f}, {z:.1f})")
@@ -254,6 +280,7 @@ def do_pick(name):
     idx = ptp(x, y, SAFE_HOVER_Z, r)
     wait_for_cmd(idx)
 
+# Place at a taught position (hover, descend, suction off, lift).
 def do_place(name):
     x, y, z, r = positions[name]
     print(f"  PLACE '{name}' ({x:.1f}, {y:.1f}, {z:.1f})")
@@ -269,6 +296,7 @@ def do_place(name):
 # ============================================================
 # PLAY MODE
 # ============================================================
+# Run the current series of task steps, honoring PLC handshakes.
 def play():
     if not tasks:
         print("No tasks to run. Add tasks in the teach menu first.")
@@ -308,6 +336,7 @@ def play():
 
     if USE_PLC:
         signal_plc_done()
+# The interactive teach menu (guide the arm, name positions, build series).
 def teach_menu():
     while True:
         print("\n" + "-" * 50)
@@ -366,6 +395,7 @@ def teach_menu():
             return "main"
         else:
             print("Unknown command.")
+# Entry point: connect to the arm and show the menu.
 def main():
     print("=" * 50)
     print("  DOBOT 2 — Pick & place with teaching + PLC")

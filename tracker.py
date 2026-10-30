@@ -1,3 +1,8 @@
+# ============================================================================
+# tracker.py - a tiny helper class: track moving objects frame to frame by
+# matching each detection to the nearest known center point and keeping a
+# stable ID per object.
+# ============================================================================
 import math
 
 

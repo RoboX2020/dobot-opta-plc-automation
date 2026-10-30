@@ -1,3 +1,8 @@
+# ============================================================================
+# gui_dashboard.py - a small control-panel app (customtkinter): the dobot3
+# teach-pendant menus wrapped in buttons and status text, so the cell does
+# not need a terminal.
+# ============================================================================
 import customtkinter as ctk
 import threading
 import sys

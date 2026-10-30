@@ -1,3 +1,36 @@
+# ============================================================================
+# Conveyor_works.py - the AI vision sorter: a camera watches a 12-cell tray
+# of wooden blocks, figures out which shape (CUBE / SPHERE / PENTAGON /
+# CLOVER) sits in each cell, then a Dobot robot arm picks them up one by
+# one and sorts them onto transfer trays - one of each shape per tray.
+# When a tray is complete, the arm carries it away and the conveyor belt
+# brings the next one.
+#
+# HOW IT WORKS, IN ORDER:
+#   Phase 1 (scanning): every camera frame, each of the 12 cells is checked.
+#     A shape guess is made per frame; a cell "locks in" only after one
+#     shape keeps winning (voting), so one bad frame can't fool it.
+#     Then a sanity auditor makes sure the totals match reality (3 of each
+#     shape) and flips the least-confident cells if they don't.
+#   Phase 2 (sorting): the arm walks the frozen map, picking blocks and
+#     dropping each at its shape's corner, tray after tray.
+#
+# THE AI PART: you can teach it by example - press a-l to target a cell,
+# then 1-4 to say what's really there. Those examples train a small
+# RandomForest model (see train_model) that then does the guessing.
+# Without training data it falls back to geometric rules (classify_shape).
+#
+# RUN IT on the robot laptop: python Conveyor_works.py
+#   Mode switches at the top: PREVIEW_ONLY = camera only, no robot;
+#   DRY_RUN = print what the robot WOULD do without moving it.
+# WHEN DEBUGGING (reasoned from the code):
+#   - "Could not open camera": wrong webcam index or camera busy.
+#   - Shapes misread: bad lighting - retrain with the 0/a-l/1-4 keys.
+#   - Robot coordinates (TRAY_POINTS etc.) are hand-taught for one exact
+#     physical setup; move the tray and they must be re-taught.
+#   - Needs the vendor library DobotEDU (from Dobot) plus opencv, numpy,
+#     scikit-learn (see requirements.txt).
+# ============================================================================
 from DobotEDU import *
 import cv2
 import numpy as np
@@ -43,6 +76,9 @@ TRANSITION_POINT = (250, 0, 100)
 TRAY_Z_OFFSET = 5.0
 Z_DOWN_OFFSET = 5.0
 
+# The 12 pickup cells of the master tray, in robot millimeters (X, Y, Z).
+# These were measured by hand ('teaching') and are specific to one exact
+# physical setup - move the tray and they must be re-taught.
 # Master Tray Coords
 NEUTRAL_VIEW = (263.8, 0, 88, 0)
 
@@ -64,6 +100,7 @@ TRAY_POINTS = {
     12: (276.3, -34.50, -33.10),
 }
 
+# Where each sorted shape gets dropped on the transfer tray (one corner per shape).
 # Transfer Tray Drop Points
 OUTPUT_POINTS = {
     "CUBE": (325.1, -89.2, -16.3),
@@ -72,6 +109,7 @@ OUTPUT_POINTS = {
     "PENTAGON": (285.8, -89.2, -16.3),
 }
 
+# Where to grab a full transfer tray, and where to carry it when done.
 # Completed Transfer Tray Pick & Drop
 COMPLETED_TRAY_PICK = (305.22, -103.6, -35.2, 0)
 COMPLETED_TRAY_PLACE = (-7, -274.7, 32, 0)
@@ -83,6 +121,8 @@ OUTPUT_POINTS = {k: (x, y, z - Z_DOWN_OFFSET) for k, (x, y, z) in OUTPUT_POINTS.
 # ============================================================
 # VISION SETTINGS
 # ============================================================
+# Vision tuning knobs: how big a blob counts as a block, how dark the tray
+# must be to be found, how the 12-cell grid is carved out of the image.
 MIN_CONTOUR_AREA = 1800
 MAX_CONTOUR_AREA = 90000
 APPROX_EPSILON_PCT = 0.02
@@ -97,6 +137,7 @@ VISUAL_ROI_SHRINK_Y = 10
 
 SCAN_WAIT_FRAMES = 150 
 
+# Display colors for each recognized shape (OpenCV stores colors as BGR).
 SHAPE_COLORS = {
     "SPHERE": (0, 255, 255),
     "CUBE": (0, 255, 0),
@@ -110,6 +151,9 @@ CELL_KEYS = {
     ord('i'): 9, ord('j'): 10, ord('k'): 11, ord('l'): 12
 }
 
+# Voting: the camera guesses a shape every frame, but a cell only 'locks in'
+# once one shape wins enough recent frames by a clear margin. This makes the
+# scan immune to single-frame misreads (shadows, a hand passing by).
 VOTE_WINDOW = 150         
 MIN_STABLE_VOTES = 12     
 STABLE_RATIO = 0.60       
@@ -118,6 +162,8 @@ MIN_MARGIN = 3
 # ============================================================
 # NON-BLOCKING CONVEYOR CHECKER
 # ============================================================
+# The conveyor belt runs on a 10-second timer; this is called constantly to
+# stop it on time (skipped entirely in the no-robot test modes).
 def check_conveyor():
     """Checks if the conveyor has been running for 10 seconds and safely shuts it down."""
     global conveyor_stop_time
@@ -130,11 +176,13 @@ def check_conveyor():
 # ============================================================
 # ROBOT CONTROL
 # ============================================================
+# Move the arm to its home 'ready' pose above the tray.
 def robot_move_to_start():
     print("ACTION: Moving to start coordinate (241.5, 3, 60, 0)")
     m_lite.set_ptpcmd(ptp_mode=1, x=241.5, y=3, z=60, r=0)
     m_lite.wait(delay=0.5)
 
+# Pick the block from one cell: hover above it, descend, suction ON, lift.
 def robot_pick(cell_index):
     if PREVIEW_ONLY:
         return
@@ -151,6 +199,7 @@ def robot_pick(cell_index):
     m_lite.set_ptpcmd(ptp_mode=1, x=x, y=y, z=50, r=0)
     check_conveyor() # Safety check during movement
 
+# Drop the held block at its shape's corner: hover, descend, suction OFF, lift.
 def robot_place(shape_name):
     if PREVIEW_ONLY:
         return
@@ -167,6 +216,7 @@ def robot_place(shape_name):
     m_lite.set_ptpcmd(ptp_mode=1, x=x, y=y, z=50, r=0)
     check_conveyor() # Safety check during movement
 
+# Carry the finished transfer tray to the drop-off point (grab, lift, carry, release).
 def robot_move_completed_tray():
     if PREVIEW_ONLY:
         return
@@ -190,10 +240,14 @@ def robot_move_completed_tray():
 # ============================================================
 # VISION LOGIC
 # ============================================================
+# Turn a camera image into a black-and-white mask where the colored blocks
+# are white. Works by filtering for the blocks' colors (pink/green/blue) in
+# HSV color space, which handles changing light better than raw RGB.
 def segment_shapes(frame):
     blurred = cv2.GaussianBlur(frame, (5, 5), 0)
     hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 
+    # Pink wraps around both ends of the hue circle, so it needs two ranges.
     pink1 = cv2.inRange(hsv, (145, 55, 45), (180, 255, 255))
     pink2 = cv2.inRange(hsv, (0, 55, 45), (10, 255, 255))
     pink = cv2.bitwise_or(pink1, pink2)
@@ -204,6 +258,8 @@ def segment_shapes(frame):
     mask = cv2.bitwise_or(pink, green)
     mask = cv2.bitwise_or(mask, blue)
 
+    # Clean the mask: open removes speckles, close fills holes, dilate grows
+    # the blobs slightly so edges are captured fully.
     kernel = np.ones((5, 5), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
@@ -211,10 +267,13 @@ def segment_shapes(frame):
 
     return mask
 
+# Find the big dark tray in the image: threshold dark pixels, clean up the
+# mask, and take the largest blob - if it is big enough to be the tray.
 def detect_tray(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (7, 7), 0)
 
+    # BINARY_INV: pixels DARKER than the threshold become white.
     _, thresh = cv2.threshold(blur, TRAY_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
 
     kernel = np.ones((7, 7), np.uint8)
@@ -232,6 +291,8 @@ def detect_tray(frame):
     x, y, w, h = cv2.boundingRect(tray_cnt)
     return x, y, w, h, tray_cnt, thresh
 
+# Pixel box of one of the 12 cells, assuming the tray fills a fixed part of
+# the image (fallback for when the tray itself was not detected).
 def get_cell_roi_coords(frame, cell_index):
     h, w = frame.shape[:2]
     idx = cell_index - 1
@@ -246,6 +307,9 @@ def get_cell_roi_coords(frame, cell_index):
     
     return x1 + VISUAL_ROI_SHRINK_X, y1 + VISUAL_ROI_SHRINK_Y, max(1, roi_w - (2 * VISUAL_ROI_SHRINK_X)), max(1, roi_h - (2 * VISUAL_ROI_SHRINK_Y))
 
+# Same, but carved out of the tray's detected position (more accurate).
+# Cells snake back and forth - odd rows run right-to-left - matching how
+# they were numbered on the physical tray.
 def get_cell_roi_coords_from_tray(tray_rect, cell_index):
     tx, ty, tw, th = tray_rect
 
@@ -269,6 +333,8 @@ def get_cell_roi_coords_from_tray(tray_rect, cell_index):
     
     return x1 + VISUAL_ROI_SHRINK_X, y1 + VISUAL_ROI_SHRINK_Y, max(1, int(cell_w) - (2 * VISUAL_ROI_SHRINK_X)), max(1, int(cell_h) - (2 * VISUAL_ROI_SHRINK_Y))
 
+# The inside angle at each corner of a polygon (squares are ~90 degrees;
+# pentagons ~108).
 def _polygon_internal_angles(pts):
     pts = np.asarray(pts, dtype=np.float32).reshape(-1, 2)
     n = len(pts)
@@ -291,22 +357,30 @@ def _polygon_internal_angles(pts):
         angles.append(np.degrees(np.arccos(cosang)))
     return angles
 
+# Decide what shape a blob is from geometry alone: how round it is, how
+# rectangular, how many corners, and how lumpy (deep notches = clover lobes).
+# A hand-tuned decision tree; the last lines are best-guess fallbacks.
 def classify_shape(contour):
     area = cv2.contourArea(contour)
     peri = cv2.arcLength(contour, True)
     if area <= 0 or peri <= 0:
         return None, None, {}
 
+    # solidity: how 'filled in' the blob is vs its convex hull (a clover's
+    # notches score lower than a solid square).
     hull = cv2.convexHull(contour)
     hull_area = cv2.contourArea(hull)
     solidity = area / hull_area if hull_area > 0 else 0.0
 
+    # approx: the blob simplified to a polygon - its corner count helps tell
+    # squares (4) from pentagons (5-7).
     approx = cv2.approxPolyDP(contour, APPROX_EPSILON_PCT * peri, True)
     verts = len(approx)
 
     x, y, w, h = cv2.boundingRect(contour)
     aspect = w / float(h) if h else 0.0
     extent = area / float(w * h) if (w * h) else 0.0
+    # circularity: 1.0 for a perfect circle, lower for edgy shapes.
     circularity = (4.0 * np.pi * area) / (peri * peri) if peri else 0.0
 
     rect = cv2.minAreaRect(contour)
@@ -321,6 +395,7 @@ def classify_shape(contour):
         if angles:
             angle_dev = float(np.mean([abs(a - 90.0) for a in angles]))
 
+    # convexity defects: deep notches along the outline - the clover's lobes.
     defects_count = 0
     hull_idx = cv2.convexHull(contour, returnPoints=False)
     if hull_idx is not None and len(hull_idx) > 3:
@@ -338,6 +413,7 @@ def classify_shape(contour):
         "angle_dev": angle_dev,
     }
 
+    # The decision tree: most confident rules first, looser fallbacks after.
     if defects_count >= 2 and (solidity < 0.94 or circularity < 0.86):
         return "CLOVER", approx, metrics
     pentagon_like = (5 <= verts <= 7 and 0.74 <= circularity <= 0.90 and rectangularity < 0.82 and angle_dev >= 10.0 and defects_count <= 1)
@@ -361,6 +437,8 @@ def classify_shape(contour):
 
     return "CUBE", approx, metrics
 
+# Look inside one cell: find the biggest block-sized blob, then classify it
+# with the trained AI model if one exists, else with the geometric rules.
 def detect_shape_in_cell(frame, cell_index, tray_rect=None):
     if tray_rect is not None:
         x, y, w_roi, h_roi = get_cell_roi_coords_from_tray(tray_rect, cell_index)
@@ -371,6 +449,7 @@ def detect_shape_in_cell(frame, cell_index, tray_rect=None):
     if roi.size == 0:
         return None, None, None, None, (x, y, w_roi, h_roi)
 
+    # Cut the cell out of the frame, find colored blobs, keep block-sized ones.
     mask = segment_shapes(roi)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
@@ -386,6 +465,7 @@ def detect_shape_in_cell(frame, cell_index, tray_rect=None):
     cnt = max(valid, key=cv2.contourArea)
     features = extract_features(cnt)
 
+    # Prefer the trained model; fall back to the geometric rule tree.
     if model is not None and features is not None:
         shape = model.predict([features])[0]
         approx = cv2.approxPolyDP(cnt, APPROX_EPSILON_PCT * cv2.arcLength(cnt, True), True)
@@ -395,6 +475,7 @@ def detect_shape_in_cell(frame, cell_index, tray_rect=None):
 
     return shape, cnt, approx, metrics, (x, y, w_roi, h_roi)
 
+# Draw the box, outline and label of a detected block onto the preview window.
 def draw_detection_overlay(display_frame, x, y, contour, approx, shape, metrics):
     color = SHAPE_COLORS.get(shape, (255, 255, 255))
     contour_full = contour + np.array([[[x, y]]], dtype=np.int32)
@@ -409,6 +490,8 @@ def draw_detection_overlay(display_frame, x, y, contour, approx, shape, metrics)
         dbg = f"circ={metrics.get('circularity',0):.2f} def={metrics.get('defects',0)} v={metrics.get('verts',0)}"
         cv2.putText(display_frame, dbg, (x + 5, y + 42), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
+# The 5 numbers that describe a blob to the AI model (size, perimeter,
+# corners, roundness, solidity).
 def extract_features(cnt):
     area = cv2.contourArea(cnt)
     peri = cv2.arcLength(cnt, True)
@@ -421,6 +504,7 @@ def extract_features(cnt):
     solidity = area / cv2.contourArea(hull) if cv2.contourArea(hull) > 0 else 0
     return [area, peri, verts, circularity, solidity]
 
+# Append one labeled example to the training spreadsheet (CSV).
 def save_sample(label, features):
     file_needs_header = not os.path.isfile(TRAIN_FILE) or os.path.getsize(TRAIN_FILE) == 0
     
@@ -431,6 +515,9 @@ def save_sample(label, features):
         writer.writerow([label] + features)
     print(f"Saved sample: {label}")
 
+# Re-train the shape recognizer from all saved examples. A RandomForest is
+# just a few hundred small decision trees voting; it learns 'blobs shaped
+# like THESE numbers are a CUBE'.
 def train_model():
     global model
     if not os.path.exists(TRAIN_FILE) or os.path.getsize(TRAIN_FILE) == 0:
@@ -464,6 +551,9 @@ def train_model():
 # ============================================================
 # AI SELF-CORRECTION AUDITOR
 # ============================================================
+# Sanity auditor: we KNOW a full tray holds exactly 3 of each shape. If the
+# scan's totals disagree, flip the least-confident surplus cells toward the
+# missing shapes (judged by their frame-by-frame vote history).
 def force_global_distribution(final_map, all_votes):
     current_counts = Counter(final_map.values())
     
@@ -527,10 +617,13 @@ def main():
         print("Error: Could not open camera.")
         return
 
+    # Per-cell vote history: the last VOTE_WINDOW raw guesses for each cell.
     cell_votes = {i: deque(maxlen=VOTE_WINDOW) for i in range(1, 13)}
     cell_stable_labels = {i: None for i in range(1, 13)}
     active_training_cell = None 
 
+    # One cell's verdict so far. Once a shape wins by enough margin, the cell
+    # is 'locked' and stops changing its mind.
     def consensus_label(cell_index: int, raw_label: Optional[str]) -> Tuple[Optional[str], int, int, float]:
         votes = cell_votes[cell_index]
         
@@ -576,6 +669,8 @@ def main():
             if not ret or frame is None:
                 break
 
+            # Find the tray, then scan all 12 cells on every frame, drawing
+            # boxes and labels on a copy we can show.
             display_frame = frame.copy()
             tray_data = detect_tray(frame)
             tray_rect = (tray_data[0], tray_data[1], tray_data[2], tray_data[3]) if tray_data else None
@@ -609,6 +704,9 @@ def main():
                 
                 cv2.putText(display_frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
                 
+                # After ~150 frames of scanning, freeze the map (unscanned cells
+                # become UNKNOWN), let the auditor fix the counts, and move to
+                # Phase 2 (the physical sort).
                 if frames_scanned >= SCAN_WAIT_FRAMES:
                     frozen_map = {k: v for k, v in cell_stable_labels.items() if v is not None}
                     
@@ -627,6 +725,9 @@ def main():
 
             key = cv2.waitKey(1) & 0xFF
             
+            # Keyboard controls while scanning: q quit | 0 batch-train all cells
+            # a-l target a cell | 1-4 label the targeted cell | Esc cancel |
+            # t retrain | p print sample count.
             if key == ord('q'):
                 break
 
@@ -699,6 +800,7 @@ def main():
             cv2.destroyAllWindows()
             
             print("\n--- INITIATING PHYSICAL SORT ---")
+            # Each transfer tray needs exactly one of each shape; up to 3 trays.
             REQUIRED_SHAPES = {"CUBE", "PENTAGON", "SPHERE", "CLOVER"}
             MAX_TRAYS = 3
             trays_completed = 0
@@ -712,6 +814,8 @@ def main():
                 current_tray_needs = set(REQUIRED_SHAPES)
                 cells_to_remove = []
                 
+                    # Walk the cells; if this cell's shape is still needed on the
+                    # current tray, pick it and place it in its corner.
                 for cell_idx in remaining_cells:
                     check_conveyor() # Check before grabbing block
                     
@@ -737,6 +841,8 @@ def main():
                     robot_move_completed_tray()
                     trays_completed += 1
                     
+                    # Tray complete: carry it off, then run the conveyor ~10s to
+                    # bring the next one in.
                     # TRIGGER THE CONVEYOR TIMER
                     print("\n[ CONVEYOR ] Starting for ~10 seconds...")
                     if not DRY_RUN and not PREVIEW_ONLY:

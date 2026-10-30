@@ -1,3 +1,10 @@
+// ============================================================================
+// opta.cpp - the Arduino Opta PLC sketch: the cell's traffic controller.
+// It watches the IR sensors on the conveyor; when a sensor sees a tray,
+// it raises the START signal for the matching Dobot arm. Each arm's DONE
+// signal comes back on the analog inputs and chains the next stage
+// (see README's I/O mapping).
+// ============================================================================
 int send_signal_1 = D1;    // start signal -> dobot 1
 int send_signal_2 = D0;    // start signal -> dobot 2
 

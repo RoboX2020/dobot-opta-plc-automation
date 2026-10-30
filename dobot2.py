@@ -1,3 +1,10 @@
+# ============================================================================
+# dobot2.py - the TEACH-PENDANT iteration. Instead of one fixed vision job,
+# this is an interactive console program: you guide the arm by hand, save
+# named positions, and build reusable pick-and-place routines ("series" of
+# task steps) that then run on PLC start signals. Taught positions are
+# saved to dobot2_coords.json. Menu-driven; run: python dobot2.py
+# ============================================================================
 # dobot3.py — Pick-and-place + teaching + PLC + waits + conveyor + multi-series
 import DobotDllType as dType
 import json
@@ -49,6 +56,7 @@ LOOP_FOREVER = True   # True = after the last series, loop back to series 1.
 # ============================================================
 # DOBOT HELPERS
 # ============================================================
+# Wait for the robot's queued command to finish executing (polls until done or timeout).
 def wait_for_cmd(idx):
     while True:
         cur = dType.GetQueuedCmdCurrentIndex(api)[0]
@@ -56,29 +64,36 @@ def wait_for_cmd(idx):
             break
         dType.dSleep(50)
 
+# Point-to-point move: send the arm to (x, y, z, r).
 def ptp(x, y, z, r=0.0):
     return dType.SetPTPCmd(api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, r, 1)[0]
 
+# Read where the arm currently is.
 def get_pose():
     p = dType.GetPose(api)
     return float(p[0]), float(p[1]), float(p[2]), float(p[3])
 
+# Turn the suction cup gripper on or off.
 def suction(on):
     dType.SetEndEffectorSuctionCup(api, 1, 1 if on else 0, 1)
 
+# Insert a pause into the robot's command queue.
 def queued_wait(ms):
     dType.SetWAITCmd(api, ms, 1)
 
+# Start or stop a conveyor belt at a given speed.
 def set_conveyor(index, speed):
     try:
         dType.SetEMotor(api, index, 1, int(speed), 0)
     except Exception as e:
         print(f"Conveyor {index} command failed: {e}")
 
+# Stop both conveyor outputs.
 def stop_all_conveyors():
     set_conveyor(STP1_INDEX, 0)
     set_conveyor(STP2_INDEX, 0)
 
+# Configure the arm's GPIO pins that talk to the PLC (pin 16 = start in, pin 22 = done out).
 def setup_plc_io():
     if not USE_PLC:
         return
@@ -87,6 +102,7 @@ def setup_plc_io():
     dType.SetIODO(api, PLC_DONE_PIN, 0)
     print(f"PLC IO configured: start=pin {PLC_START_PIN}, done=pin {PLC_DONE_PIN}")
 
+# Pause here until the PLC raises the start signal (the previous stage finished).
 def wait_for_plc_start():
     print(f"Waiting for PLC start signal on pin {PLC_START_PIN}... (Ctrl+C to cancel)")
     try:
@@ -100,12 +116,14 @@ def wait_for_plc_start():
         raise
     print("PLC start received.")
 
+# Tell the PLC 'my stage is done' by pulsing the done pin.
 def signal_plc_done():
     print("Asserting done signal to PLC.")
     dType.SetIODO(api, PLC_DONE_PIN, 1)
     time.sleep(1.0)
     dType.SetIODO(api, PLC_DONE_PIN, 0)
 
+# Open the USB connection to the arm and sanity-check it.
 def connect():
     global api
     api = dType.load()
@@ -124,6 +142,7 @@ def connect():
     setup_plc_io()
     print("Dobot ready.")
 
+# Close the connection cleanly.
 def disconnect():
     try:
         stop_all_conveyors()
@@ -132,6 +151,7 @@ def disconnect():
     except Exception:
         pass
 
+# Send the arm to its calibrated home position.
 def home_arm():
     print("Homing... (arm will move to home position)")
     home_idx = dType.SetHOMECmd(api, 0, 1)[0]
@@ -141,6 +161,7 @@ def home_arm():
 # ============================================================
 # PERSISTENCE
 # ============================================================
+# Load the taught positions/series from the JSON save file.
 def load_data():
     global positions, series_list, active_series_idx
     if os.path.exists(COORDS_FILE):
@@ -178,6 +199,7 @@ def load_data():
     series_list = [[]]
     active_series_idx = 0
 
+# Write the taught positions/series back to the JSON save file.
 def save_data():
     with open(COORDS_FILE, "w") as f:
         json.dump({"positions": positions, "series": series_list}, f, indent=2)
@@ -187,12 +209,14 @@ def save_data():
 # ============================================================
 # ACTIVE SERIES HELPERS
 # ============================================================
+# The task list of the currently active series.
 def cur_tasks():
     return series_list[active_series_idx]
 
 # ============================================================
 # TEACHING / POSITIONS
 # ============================================================
+# Save the arm's current position under a name (teaching by guiding).
 def teach_position(name):
     print("\n" + "=" * 50)
     print(f"  TEACHING: '{name}'")
@@ -210,6 +234,7 @@ def teach_position(name):
     save_data()
     return True
 
+# Print all taught positions.
 def list_positions():
     if not positions:
         print("No positions saved.")
@@ -219,6 +244,7 @@ def list_positions():
         x, y, z, r = positions[name]
         print(f"  {name:20s} ({x:7.2f}, {y:7.2f}, {z:7.2f}, {r:6.2f})")
 
+# Delete a taught position.
 def delete_position(name):
     if name in positions:
         del positions[name]
@@ -227,6 +253,7 @@ def delete_position(name):
     else:
         print(f"'{name}' not found.")
 
+# Move to a taught position (to check a teaching).
 def test_move(name):
     if name not in positions:
         print(f"'{name}' not found.")
@@ -246,12 +273,14 @@ def test_move(name):
 # ============================================================
 # SERIES MANAGEMENT
 # ============================================================
+# Print the saved series (a series = a named routine of task steps).
 def list_series():
     print(f"\n--- Series ({len(series_list)} total) ---")
     for i, s in enumerate(series_list, 1):
         marker = " <-- active" if (i - 1) == active_series_idx else ""
         print(f"  Series {i}: {len(s)} tasks{marker}")
 
+# Choose which series the menu commands apply to.
 def switch_active_series(n_str):
     global active_series_idx
     try:
@@ -265,11 +294,13 @@ def switch_active_series(n_str):
     active_series_idx = n - 1
     print(f"Active series is now {n}.")
 
+# Create a new empty series.
 def add_new_series():
     series_list.append([])
     save_data()
     print(f"Added empty series. Now {len(series_list)} series total.")
 
+# Delete the current series.
 def delete_active_series():
     global active_series_idx
     if len(series_list) == 1:
@@ -285,6 +316,7 @@ def delete_active_series():
 # ============================================================
 # TASK MANAGEMENT (operates on cur_tasks() = active series)
 # ============================================================
+# Print the task steps of the current series.
 def list_tasks():
     tasks = cur_tasks()
     if not tasks:
@@ -309,6 +341,7 @@ def list_tasks():
         else:
             print(f"  [{i}] PICK '{t['pick']}' -> PLACE '{t['place']}'")
 
+# Add a move step to the series.
 def add_task():
     list_positions()
     if len(positions) < 2:
@@ -326,6 +359,7 @@ def add_task():
     save_data()
     print(f"Added pick-place to series {active_series_idx + 1} (position {len(cur_tasks())}).")
 
+# Add a pause step.
 def add_wait_task(seconds_str, position_str=None):
     try:
         sec = float(seconds_str)
@@ -352,6 +386,7 @@ def add_wait_task(seconds_str, position_str=None):
     save_data()
     print(f"Added wait ({sec}s) to series {active_series_idx + 1} at position {idx}.")
 
+# Add a conveyor-run step.
 def add_conveyor_task(speed_str, duration_str=None, index_str=None, position_str=None):
     try:
         speed = int(float(speed_str))
@@ -400,6 +435,7 @@ def add_conveyor_task(speed_str, duration_str=None, index_str=None, position_str
     else:
         print(f"Added conveyor ({name} speed={speed}) to series {active_series_idx + 1} at position {pos}.")
 
+# Run a conveyor by hand.
 def manual_conveyor(speed_str, duration_str=None, index_str=None):
     try:
         speed = int(float(speed_str))
@@ -434,6 +470,7 @@ def manual_conveyor(speed_str, duration_str=None, index_str=None):
             print(f"  Conveyor {name} ON at {speed} pps (no auto-stop).")
         set_conveyor(index, speed)
 
+# Add a move-from-A-to-B step.
 def move_task(from_str, to_str):
     tasks = cur_tasks()
     try:
@@ -452,6 +489,7 @@ def move_task(from_str, to_str):
     print(f"Moved task {from_idx + 1} -> {to_idx + 1}")
     list_tasks()
 
+# Remove a step from the series.
 def delete_task(idx_str):
     tasks = cur_tasks()
     try:
@@ -468,6 +506,7 @@ def delete_task(idx_str):
 # ============================================================
 # PICK AND PLACE
 # ============================================================
+# Pick at a taught position (hover, descend, suction on, lift).
 def do_pick(name):
     x, y, z, r = positions[name]
     print(f"    PICK '{name}' ({x:.1f}, {y:.1f}, {z:.1f})")
@@ -480,6 +519,7 @@ def do_pick(name):
     idx = ptp(x, y, SAFE_HOVER_Z, r)
     wait_for_cmd(idx)
 
+# Place at a taught position (hover, descend, suction off, lift).
 def do_place(name):
     x, y, z, r = positions[name]
     print(f"    PLACE '{name}' ({x:.1f}, {y:.1f}, {z:.1f})")
@@ -495,6 +535,7 @@ def do_place(name):
 # ============================================================
 # PLAY MODE — runs each series on its own PLC trigger
 # ============================================================
+# Run the current series of task steps, honoring PLC handshakes.
 def play():
     if not series_list or all(len(s) == 0 for s in series_list):
         print("No tasks in any series. Add tasks first.")
@@ -586,6 +627,7 @@ def play():
 # ============================================================
 # MENUS
 # ============================================================
+# The interactive teach menu (guide the arm, name positions, build series).
 def teach_menu():
     while True:
         active_count = len(cur_tasks())
@@ -716,6 +758,7 @@ def teach_menu():
         else:
             print("Unknown command.")
 
+# Entry point: connect to the arm and show the menu.
 def main():
     print("=" * 50)
     print("  DOBOT 3 — Multi-series pick & place + PLC + conveyor")

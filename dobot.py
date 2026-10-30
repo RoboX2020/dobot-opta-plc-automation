@@ -1,3 +1,10 @@
+# ============================================================================
+# dobot.py - the FIRST working iteration of the AI vision sorter. The
+# finished version is Conveyor_works.py - read ITS header first for the
+# full story of how the sorting cell works. This file has the same two
+# phases (camera scan with voting, then robotic sorting) but drives the
+# arm through the lower-level DobotDllType vendor API. Kept for history.
+# ============================================================================
 import DobotDllType as dType
 import cv2
 import numpy as np
@@ -157,6 +164,7 @@ def run_conveyor_async(duration=5.0):
 # ============================================================
 # ROBOT CONTROL
 # ============================================================
+# Move the arm to its home 'ready' pose above the tray.
 def robot_move_to_start():
     print("ACTION: Moving to start coordinate (241.5, 3, 60, 0)")
     if DRY_RUN or PREVIEW_ONLY:
@@ -165,6 +173,7 @@ def robot_move_to_start():
     wait_for_cmd(idx)
     dType.dSleep(500)
 
+# Pick the block from one cell: hover above it, descend, suction ON, lift.
 def robot_pick(cell_index):
     if PREVIEW_ONLY or cell_index not in TRAY_POINTS:
         return
@@ -179,6 +188,7 @@ def robot_pick(cell_index):
     idx = ptp(x, y, 50, 0)
     wait_for_cmd(idx)
 
+# Drop the held block at its shape's corner: hover, descend, suction OFF, lift.
 def robot_place(shape_name):
     if PREVIEW_ONLY or shape_name not in OUTPUT_POINTS:
         return
@@ -193,6 +203,7 @@ def robot_place(shape_name):
     idx = ptp(x, y, 50, 0)
     wait_for_cmd(idx)
 
+# Carry the finished transfer tray to the drop-off point (grab, lift, carry, release).
 def robot_move_completed_tray():
     if PREVIEW_ONLY:
         return
@@ -216,6 +227,7 @@ def robot_move_completed_tray():
 # ============================================================
 # VISION LOGIC (UNCHANGED — pure OpenCV/sklearn)
 # ============================================================
+# Turn a camera image into a black-and-white mask where the colored blocks are white (filter the blocks' colors in HSV space, then clean up speckles).
 def segment_shapes(frame):
     blurred = cv2.GaussianBlur(frame, (5, 5), 0)
     hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
@@ -232,6 +244,7 @@ def segment_shapes(frame):
     mask = cv2.dilate(mask, kernel, iterations=1)
     return mask
 
+# Find the big dark tray in the image: threshold dark pixels, clean up, take the largest blob big enough to be the tray.
 def detect_tray(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (7, 7), 0)
@@ -248,6 +261,7 @@ def detect_tray(frame):
     x, y, w, h = cv2.boundingRect(tray_cnt)
     return x, y, w, h, tray_cnt, thresh
 
+# Pixel box of one of the 12 cells, assuming the tray fills a fixed part of the image (fallback when the tray was not detected).
 def get_cell_roi_coords(frame, cell_index):
     h, w = frame.shape[:2]
     idx = cell_index - 1
@@ -261,6 +275,7 @@ def get_cell_roi_coords(frame, cell_index):
             max(1, roi_w - 2 * VISUAL_ROI_SHRINK_X),
             max(1, roi_h - 2 * VISUAL_ROI_SHRINK_Y))
 
+# Same, but carved out of the tray's detected position (more accurate). Cells snake back and forth, matching the physical numbering.
 def get_cell_roi_coords_from_tray(tray_rect, cell_index):
     tx, ty, tw, th = tray_rect
     idx = cell_index - 1
@@ -280,6 +295,7 @@ def get_cell_roi_coords_from_tray(tray_rect, cell_index):
             max(1, int(cell_w) - 2 * VISUAL_ROI_SHRINK_X),
             max(1, int(cell_h) - 2 * VISUAL_ROI_SHRINK_Y))
 
+# The inside angle at each corner of a polygon (squares ~90, pentagons ~108).
 def _polygon_internal_angles(pts):
     pts = np.asarray(pts, dtype=np.float32).reshape(-1, 2)
     n = len(pts)
@@ -301,6 +317,7 @@ def _polygon_internal_angles(pts):
         angles.append(np.degrees(np.arccos(cosang)))
     return angles
 
+# Decide what shape a blob is from geometry alone: roundness, rectangularity, corner count, and notch depth (clover lobes). A hand-tuned decision tree with best-guess fallbacks.
 def classify_shape(contour):
     area = cv2.contourArea(contour)
     peri = cv2.arcLength(contour, True)
@@ -362,6 +379,7 @@ def classify_shape(contour):
         return "PENTAGON", approx, metrics
     return "CUBE", approx, metrics
 
+# Look inside one cell: find the biggest block-sized blob, then classify it with the trained AI model if one exists, else with the geometric rules.
 def detect_shape_in_cell(frame, cell_index, tray_rect=None):
     if tray_rect is not None:
         x, y, w_roi, h_roi = get_cell_roi_coords_from_tray(tray_rect, cell_index)
@@ -385,6 +403,7 @@ def detect_shape_in_cell(frame, cell_index, tray_rect=None):
         shape, approx, metrics = classify_shape(cnt)
     return shape, cnt, approx, metrics, (x, y, w_roi, h_roi)
 
+# Draw the box, outline and label of a detected block onto the preview window.
 def draw_detection_overlay(display_frame, x, y, contour, approx, shape, metrics):
     color = SHAPE_COLORS.get(shape, (255, 255, 255))
     contour_full = contour + np.array([[[x, y]]], dtype=np.int32)
@@ -396,6 +415,7 @@ def draw_detection_overlay(display_frame, x, y, contour, approx, shape, metrics)
         dbg = f"circ={metrics.get('circularity',0):.2f} def={metrics.get('defects',0)} v={metrics.get('verts',0)}"
         cv2.putText(display_frame, dbg, (x + 5, y + 42), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
+# The 5 numbers that describe a blob to the AI model (size, perimeter, corners, roundness, solidity).
 def extract_features(cnt):
     area = cv2.contourArea(cnt)
     peri = cv2.arcLength(cnt, True)
@@ -408,6 +428,7 @@ def extract_features(cnt):
     solidity = area / cv2.contourArea(hull) if cv2.contourArea(hull) > 0 else 0
     return [area, peri, verts, circularity, solidity]
 
+# Append one labeled example to the training spreadsheet (CSV).
 def save_sample(label, features):
     file_needs_header = not os.path.isfile(TRAIN_FILE) or os.path.getsize(TRAIN_FILE) == 0
     with open(TRAIN_FILE, "a", newline="") as f:
@@ -417,6 +438,7 @@ def save_sample(label, features):
         writer.writerow([label] + features)
     print(f"Saved sample: {label}")
 
+# Re-train the shape recognizer (a RandomForest: many small decision trees voting) from all saved examples.
 def train_model():
     global model
     if not os.path.exists(TRAIN_FILE) or os.path.getsize(TRAIN_FILE) == 0:
@@ -445,6 +467,7 @@ def train_model():
     except Exception as e:
         print(f"ERROR reading training file: {e}")
 
+# Sanity auditor: a full tray holds exactly 3 of each shape; if the scan's totals disagree, flip the least-confident surplus cells toward the missing shapes.
 def force_global_distribution(final_map, all_votes):
     current_counts = Counter(final_map.values())
     surplus, deficit = [], []
@@ -485,6 +508,7 @@ def force_global_distribution(final_map, all_votes):
 # ============================================================
 # MAIN
 # ============================================================
+# Entry point: train the model, scan the tray (Phase 1), then sort it robotically (Phase 2).
 def main():
     global api, PREVIEW_ONLY
 

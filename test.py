@@ -1,3 +1,8 @@
+# ============================================================================
+# test.py - a hardware bring-up script: connect to the arm over USB, read
+# and clear any alarms, and confirm it answers. Run this first when the
+# hardware misbehaves.
+# ============================================================================
 import DobotDllType as dType
 import time
 

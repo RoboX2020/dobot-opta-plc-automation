@@ -1,3 +1,9 @@
+# ============================================================================
+# Main_PLC-Python-Dobot.py - the Allen-Bradley PLC variant: sorting logic
+# similar to the vision sorter, but talking to a Logix PLC over EtherNet/IP
+# (pycomm3) instead of the Arduino Opta's GPIO pins. Early integration
+# prototype kept for reference.
+# ============================================================================
 ####################################################################################################################################
 #
 #   Imported Libraries
@@ -18,6 +24,7 @@ from tracker import *
 #
 ####################################################################################################################################
 
+# Sort mode: pick blocks in random order.
 def Random_Sort(count):
     print("Inside Random. Count: ", count)
     PLC_SysRunning, PLC_Stop, PLC_EStop, PLC_Conveyor, PLC_Color,Sort_Color_Array,Sort_Random,Sort_Manual,Manual_Color,Sort_Same,Sort_Array,PLC_Conveyor_Speed,Count_Reset = PLC_Read()
@@ -57,6 +64,7 @@ def Random_Sort(count):
             pass
     return count
 
+# Sort mode: pick all blocks of one chosen color.
 def Same_Sort(color, rc, gc, bc, yc):
     PLC_SysRunning, PLC_Stop, PLC_EStop, PLC_Conveyor, PLC_Color,Sort_Color_Array,Sort_Random,Sort_Manual,Manual_Color,Sort_Same,Sort_Array,PLC_Conveyor_Speed,Count_Reset = PLC_Read()
     if (color == 'Red') & (rc < 5):
@@ -164,6 +172,7 @@ def Same_Sort(color, rc, gc, bc, yc):
         print("Maxed Out Yellow")
     return rc, gc, bc, yc
 
+# Sort mode: follow a pre-set color/count arrangement.
 def Array_Sort(CA, CA_Count, color):
     PLC_SysRunning, PLC_Stop, PLC_EStop, PLC_Conveyor, PLC_Color,Sort_Color_Array,Sort_Random,Sort_Manual,Manual_Color,Sort_Same,Sort_Array,PLC_Conveyor_Speed,Count_Reset = PLC_Read()
     if color == 'Red':
@@ -211,6 +220,7 @@ def Array_Sort(CA, CA_Count, color):
             dType.SetQueuedCmdStopExec(api)
     return CA_Count
 
+# Sort mode: operator chooses each color manually.
 def Manual_Sort(count, color, man_color):
     PLC_SysRunning, PLC_Stop, PLC_EStop, PLC_Conveyor, PLC_Color,Sort_Color_Array,Sort_Random,Sort_Manual,Manual_Color,Sort_Same,Sort_Array,PLC_Conveyor_Speed,Count_Reset = PLC_Read()
     print(color)
@@ -254,6 +264,7 @@ def Manual_Sort(count, color, man_color):
         print("Maxed Out")
     return count
 
+# Read the current inputs/flags from the Logix PLC.
 def PLC_Read():
     with LogixDriver('192.168.222.51') as plc:                               
             PLC_SysRunning = plc.read('Program:MainProgram.System_Running')               
@@ -275,6 +286,7 @@ def PLC_Read():
             Count_Reset = plc.read('Program:MainProgram.Reset_Count')
             return PLC_SysRunning, PLC_Stop, PLC_EStop, PLC_Conveyor, PLC_Color,Sort_Color_Array,Sort_Random,Sort_Manual,Manual_Color,Sort_Same,Sort_Array,PLC_Conveyor_Speed,Count_Reset
 
+# Move the Dobot to pick at (x, y).
 def Dob_Pick(x,y):
     dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, 250, y, 90, 50, isQueued = 1)
     dType.dSleep(1000)
@@ -294,12 +306,14 @@ def Dob_Pick(x,y):
     BS = 1
     return BS
 
+# Run the conveyor under PLC control.
 def Con_Run(PLC):
     STEP_PER_CRICLE = 360.0 / 1.8 * 10.0 * 16.0
     MM_PER_CRICLE = 3.1415926535898 * 36.0
     vel = float(PLC) * STEP_PER_CRICLE / MM_PER_CRICLE
     return int(vel)
 
+# Reset the block counters.
 def Count_Reset_Fun():
     with LogixDriver('192.168.222.51') as plc:     
         plc.write('Program:MainProgram.Block_Count', 0)
